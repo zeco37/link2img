@@ -16,7 +16,7 @@ cloudinary.config(
 )
 
 st.set_page_config(page_title="Image Downloader", page_icon="📥", layout="centered")
-st.title("📥 Link2Img")
+st.title("📥 Link Converter")
 
 
 # ========= Filename Sanitizer =========
