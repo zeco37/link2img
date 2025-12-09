@@ -1,4 +1,6 @@
-openpyxl
+streamlit
 pandas
-requests
+cloudinary
 Pillow
+requests
+openpyxl
