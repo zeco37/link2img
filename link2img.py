@@ -6,46 +6,52 @@ from PIL import Image
 import requests
 from io import BytesIO
 import zipfile
-import os
 import re
 
-# === Cloudinary Config ===
+# ========= Cloudinary Config =========
 cloudinary.config(
     cloud_name=st.secrets["dqye9uju0"],
     api_key=st.secrets["786456455339284"],
     api_secret=st.secrets["wHsLn_TPTtUR1dZezXbEaFWXy3g"]
 )
 
-st.title("CSV Image Downloader + Cloudinary Uploader")
+st.set_page_config(page_title="Image Downloader", page_icon="📥", layout="centered")
+st.title("📥 CSV Image Downloader + Cloudinary Uploader")
 
-uploaded_file = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
 
-def sanitize_filename(name):
-    name = re.sub(r'[^a-zA-Z0-9_\- ]', "_", name)
-    return name.strip()    
+# ========= Filename Sanitizer =========
+def sanitize_filename(name: str):
+    return re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip()
 
-if uploaded_file:
-    if uploaded_file.name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
+
+# ========= File Upload =========
+uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
+
+if uploaded:
+
+    # Load file
+    if uploaded.name.endswith(".csv"):
+        df = pd.read_csv(uploaded)
     else:
-        df = pd.read_excel(uploaded_file)
+        df = pd.read_excel(uploaded)
 
+    st.subheader("📌 Columns detected:")
     st.json(list(df.columns))
 
     product_col = st.selectbox("Select product column", df.columns)
     url_col = st.selectbox("Select image URL column", df.columns)
 
-    if st.button("Start Process"):
-        st.info("Downloading images and uploading to Cloudinary...")
+    if st.button("🚀 Process Images"):
 
         zip_buffer = BytesIO()
         cloud_urls = []
-        downloaded = 0
+        count = 0
 
         with zipfile.ZipFile(zip_buffer, "w") as zipf:
+
             for idx, row in df.iterrows():
-                product = str(row[product_col])
-                url = str(row[url_col])
+                product = str(row[product_col]).strip()
+                url = str(row[url_col]).strip()
 
                 if not url.startswith("http"):
                     cloud_urls.append(None)
@@ -58,47 +64,48 @@ if uploaded_file:
                     if img.mode == "RGBA":
                         img = img.convert("RGB")
 
-                    filename = sanitize_filename(product) + ".jpg"
+                    filename = sanitize_filename(product)
 
-                    # Upload to Cloudinary
-                    upload_result = cloudinary.uploader.upload(
+                    # ===== Upload to Cloudinary =====
+                    upload_res = cloudinary.uploader.upload(
                         BytesIO(r.content),
                         folder="streamlit_import",
-                        public_id=filename.replace(".jpg",""),
-                        overwrite=True,
-                        resource_type="image"
+                        public_id=filename,
+                        overwrite=True
                     )
 
-                    c_url = upload_result["secure_url"]
+                    c_url = upload_res.get("secure_url")
                     cloud_urls.append(c_url)
 
-                    # Add to ZIP
+                    # ===== Add image to ZIP =====
                     img_bytes = BytesIO()
-                    img.save(img_bytes, format="JPEG", quality=90)
+                    img.save(img_bytes, "JPEG", quality=90)
                     img_bytes.seek(0)
-                    zipf.writestr(filename, img_bytes.getvalue())
-                    downloaded += 1
+
+                    zipf.writestr(filename + ".jpg", img_bytes.getvalue())
+                    count += 1
 
                 except:
                     cloud_urls.append(None)
 
-        st.success(f"Done! {downloaded} images processed.")
+        # ========= Update CSV =========
+        df["Cloudinary URL"] = cloud_urls
 
-        # Add column with Cloudinary URLs
-        df["Cloudinary Url"] = cloud_urls
+        st.success(f"🎉 Done! {count} images processed.")
 
-        # Download updated table
+        # Download CSV
         st.download_button(
-            "⬇️ Download Updated CSV (with Cloudinary URLs)",
+            "⬇️ Download Updated CSV",
             data=df.to_csv(index=False).encode("utf-8"),
             file_name="updated.csv",
             mime="text/csv"
         )
 
-        # Download ZIP of images
+        # Download ZIP
         st.download_button(
-            "⬇️ Download ZIP of Images",
+            "⬇️ Download Images ZIP",
             data=zip_buffer.getvalue(),
             file_name="images.zip",
             mime="application/zip"
         )
+
