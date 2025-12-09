@@ -10,9 +10,9 @@ import re
 
 # ========= Cloudinary Config =========
 cloudinary.config(
-    cloud_name=st.secrets["dqye9uju0"],
-    api_key=st.secrets["786456455339284"],
-    api_secret=st.secrets["wHsLn_TPTtUR1dZezXbEaFWXy3g"]
+    cloud_name=st.secrets["CLOUDINARY_CLOUD_NAME"],
+    api_key=st.secrets["CLOUDINARY_API_KEY"],
+    api_secret=st.secrets["CLOUDINARY_API_SECRET"]
 )
 
 st.set_page_config(page_title="Image Downloader", page_icon="📥", layout="centered")
