@@ -2,45 +2,48 @@ import streamlit as st
 import pandas as pd
 import cloudinary
 import cloudinary.uploader
+from cloudinary import CloudinaryImage
 from PIL import Image
 import requests
 from io import BytesIO
 import zipfile
 import re
 
-# ========= Cloudinary Config =========
+# ─────────────────────────────────────────────
+# Cloudinary config (from Streamlit secrets)
+# ─────────────────────────────────────────────
 try:
     cloudinary.config(
         cloud_name=st.secrets["CLOUDINARY_CLOUD_NAME"],
         api_key=st.secrets["CLOUDINARY_API_KEY"],
-        api_secret=st.secrets["CLOUDINARY_API_SECRET"]
+        api_secret=st.secrets["CLOUDINARY_API_SECRET"],
+        secure=True,
     )
 except Exception:
     st.error("❌ Cloudinary secrets not found. Please configure secrets.toml")
     st.stop()
 
+st.set_page_config(page_title="Link → Image ZIP", page_icon="📦", layout="centered")
+st.title("📦 Image Downloader → ZIP + Cloudinary")
 
-st.set_page_config(page_title="Image Downloader", page_icon="📥", layout="centered")
-st.title("📥 Link Converter")
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or "image"
 
-
-# ========= Filename Sanitizer =========
-def sanitize_filename(name: str):
-    return re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip()
-
-
-# ========= File Upload =========
+# ─────────────────────────────────────────────
+# Upload file
+# ─────────────────────────────────────────────
 uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
 
 if uploaded:
-
-    # Load file
-    if uploaded.name.endswith(".csv"):
+    if uploaded.name.lower().endswith(".csv"):
         df = pd.read_csv(uploaded)
     else:
         df = pd.read_excel(uploaded)
 
-    st.subheader("📌 Columns detected:")
+    st.subheader("📌 Columns detected")
     st.json(list(df.columns))
 
     product_col = st.selectbox("Select product column", df.columns)
@@ -49,68 +52,84 @@ if uploaded:
     if st.button("🚀 Process Images"):
 
         zip_buffer = BytesIO()
-        cloud_urls = []
-        count = 0
 
-        with zipfile.ZipFile(zip_buffer, "w") as zipf:
+        # IMPORTANT: pre-size list to avoid ValueError
+        cloud_urls = [None] * len(df)
+        success_count = 0
 
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+
+            # ─────────────────────────────────────────────
+            # ✅ CORRECTED LOOP (INDEX-BASED – SAFE)
+            # ─────────────────────────────────────────────
             for idx, row in df.iterrows():
                 product = str(row[product_col]).strip()
                 url = str(row[url_col]).strip()
 
                 if not url.startswith("http"):
-                    cloud_urls.append(None)
+                    cloud_urls[idx] = None
                     continue
 
                 try:
+                    # Download image
                     r = requests.get(url, timeout=20)
-                    img = Image.open(BytesIO(r.content))
+                    r.raise_for_status()
 
+                    img = Image.open(BytesIO(r.content))
                     if img.mode == "RGBA":
                         img = img.convert("RGB")
 
                     filename = sanitize_filename(product)
 
-                    # ===== Upload to Cloudinary =====
+                    # Upload to Cloudinary (FORCE JPG)
                     upload_res = cloudinary.uploader.upload(
                         BytesIO(r.content),
-                        folder="streamlit_import",
+                        folder="Products",
                         public_id=filename,
-                        overwrite=True
+                        overwrite=True,
+                        resource_type="image",
+                        format="jpg",
+                        use_filename=True,
+                        unique_filename=False,
                     )
 
-                    c_url = upload_res.get("secure_url")
-                    cloud_urls.append(c_url)
+                    # Build DOWNLOAD-ALLOWED URL
+                    cloud_url = CloudinaryImage(upload_res["public_id"]).build_url(
+                        secure=True,
+                        format="jpg",
+                        flags="attachment",
+                    )
 
-                    # ===== Add image to ZIP =====
+                    cloud_urls[idx] = cloud_url
+
+                    # Add image to ZIP
                     img_bytes = BytesIO()
                     img.save(img_bytes, "JPEG", quality=90)
                     img_bytes.seek(0)
 
                     zipf.writestr(filename + ".jpg", img_bytes.getvalue())
-                    count += 1
+                    success_count += 1
 
-                except:
-                    cloud_urls.append(None)
+                except Exception:
+                    cloud_urls[idx] = None
 
-        # ========= Update CSV =========
+        # ─────────────────────────────────────────────
+        # Save results
+        # ─────────────────────────────────────────────
         df["Cloudinary URL"] = cloud_urls
 
-        st.success(f"🎉 Done! {count} images processed.")
+        st.success(f"🎉 Done! {success_count} images processed.")
 
-        # Download CSV
-        st.download_button(
-            "⬇️ Download Updated CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="updated.csv",
-            mime="text/csv"
-        )
-
-        # Download ZIP
         st.download_button(
             "⬇️ Download Images ZIP",
             data=zip_buffer.getvalue(),
             file_name="images.zip",
-            mime="application/zip"
+            mime="application/zip",
         )
 
+        st.download_button(
+            "⬇️ Download Updated CSV",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name="updated_with_cloudinary.csv",
+            mime="text/csv",
+        )
