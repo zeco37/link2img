@@ -9,11 +9,16 @@ import zipfile
 import re
 
 # ========= Cloudinary Config =========
-cloudinary.config(
-    cloud_name=st.secrets["CLOUDINARY_CLOUD_NAME"],
-    api_key=st.secrets["CLOUDINARY_API_KEY"],
-    api_secret=st.secrets["CLOUDINARY_API_SECRET"]
-)
+try:
+    cloudinary.config(
+        cloud_name=st.secrets["CLOUDINARY_CLOUD_NAME"],
+        api_key=st.secrets["CLOUDINARY_API_KEY"],
+        api_secret=st.secrets["CLOUDINARY_API_SECRET"]
+    )
+except Exception:
+    st.error("❌ Cloudinary secrets not found. Please configure secrets.toml")
+    st.stop()
+
 
 st.set_page_config(page_title="Image Downloader", page_icon="📥", layout="centered")
 st.title("📥 Link Converter")
