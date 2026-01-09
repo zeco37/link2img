@@ -1,45 +1,61 @@
 import streamlit as st
 import pandas as pd
-import requests
 import boto3
+import requests
 from PIL import Image
 from io import BytesIO
 import zipfile
 import re
 
 # ─────────────────────────────────────────────
-# AWS S3 CONFIG
+# Streamlit Config
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="Image → ZIP + Server",
+    page_icon="📦",
+    layout="centered",
+)
+
+st.title("📦 Image Downloader → Company Server")
+
+# ─────────────────────────────────────────────
+# S3 CONFIG (FROM SECRETS)
 # ─────────────────────────────────────────────
 try:
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
-        region_name=st.secrets["AWS_REGION"],
-    )
-    BUCKET = st.secrets["AWS_BUCKET_NAME"]
-except Exception as e:
-    st.error("❌ AWS secrets not configured correctly")
+    AWS_ACCESS_KEY = st.secrets["AWS_ACCESS_KEY_ID"]
+    AWS_SECRET_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
+    S3_BUCKET = st.secrets["S3_BUCKET"]
+    S3_PREFIX = "streamlit/"
+    PUBLIC_BASE_URL = "https://static.ora.ma/streamlit/"
+except Exception:
+    st.error("❌ Missing AWS secrets in Streamlit")
     st.stop()
 
-BASE_URL = "https://static.ora.ma/streamlit/"
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=AWS_ACCESS_KEY,
+    aws_secret_access_key=AWS_SECRET_KEY,
+)
 
 # ─────────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────────
-st.set_page_config(page_title="Link → Image ZIP (S3)", page_icon="📦")
-st.title("📦 Image Downloader → ZIP + Company Server")
-
-# ─────────────────────────────────────────────
-# Helpers
+# HELPERS
 # ─────────────────────────────────────────────
 def sanitize_filename(name: str) -> str:
-    name = str(name)
-    name = re.sub(r"[^A-Za-z0-9_\- ]", "_", name)
-    return name.strip().replace(" ", "_") or "image"
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name).strip() or "image"
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://glovoapp.com/",
+}
 
 # ─────────────────────────────────────────────
-# Upload file
+# FILE UPLOAD
 # ─────────────────────────────────────────────
 uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
 
@@ -52,52 +68,46 @@ if uploaded:
     st.subheader("📌 Columns detected")
     st.json(list(df.columns))
 
-    product_col = st.selectbox("Select product name column", df.columns)
+    product_col = st.selectbox("Select product column", df.columns)
     url_col = st.selectbox("Select image URL column", df.columns)
 
     if st.button("🚀 Process Images"):
-
         zip_buffer = BytesIO()
-        image_urls = [None] * len(df)
+        server_urls = [None] * len(df)
 
         uploaded_count = 0
         skipped_count = 0
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-
             for idx, row in df.iterrows():
-
-                # ─── Validate URL ─────────────────────
-                if pd.isna(row[url_col]):
-                    skipped_count += 1
-                    continue
-
+                product = str(row[product_col]).strip()
                 url = str(row[url_col]).strip()
-                if not url.lower().startswith(("http://", "https://")):
+
+                if not url.startswith("http"):
                     skipped_count += 1
                     continue
 
-                filename = sanitize_filename(row[product_col]) + ".jpg"
-                s3_key = f"streamlit/{filename}"
+                filename = sanitize_filename(product) + ".jpg"
+                s3_key = S3_PREFIX + filename
 
                 try:
-                    # Download image
-                    r = requests.get(url, timeout=20)
+                    # DOWNLOAD IMAGE (BROWSER MODE)
+                    r = requests.get(url, headers=BROWSER_HEADERS, timeout=25)
                     r.raise_for_status()
 
                     img = Image.open(BytesIO(r.content))
                     if img.mode == "RGBA":
                         img = img.convert("RGB")
 
-                    # Convert to JPG
+                    # SAVE JPG
                     img_bytes = BytesIO()
                     img.save(img_bytes, "JPEG", quality=90)
                     img_bytes.seek(0)
 
-                    # Upload to S3
+                    # UPLOAD TO S3
                     s3.upload_fileobj(
                         img_bytes,
-                        BUCKET,
+                        S3_BUCKET,
                         s3_key,
                         ExtraArgs={
                             "ContentType": "image/jpeg",
@@ -105,22 +115,19 @@ if uploaded:
                         },
                     )
 
-                    public_url = BASE_URL + filename
-                    image_urls[idx] = public_url
+                    public_url = PUBLIC_BASE_URL + filename
+                    server_urls[idx] = public_url
 
-                    # Add to ZIP
+                    # ADD TO ZIP
                     zipf.writestr(filename, img_bytes.getvalue())
 
                     uploaded_count += 1
 
                 except Exception as e:
                     skipped_count += 1
-                    image_urls[idx] = None
+                    server_urls[idx] = None
 
-        # ─────────────────────────────────────────────
-        # Save results
-        # ─────────────────────────────────────────────
-        df["Image URL (Server)"] = image_urls
+        df["Server Image URL"] = server_urls
 
         st.success(f"🎉 Uploaded: {uploaded_count} | Skipped: {skipped_count}")
 
