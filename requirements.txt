@@ -1,7 +1,6 @@
 streamlit
 pandas
-cloudinary
-Pillow
-requests
-openpyxl
 boto3
+requests
+pillow
+openpyxl
