@@ -1,47 +1,68 @@
 import streamlit as st
 import pandas as pd
-import cloudinary
-import cloudinary.uploader
-from cloudinary import CloudinaryImage
+import boto3
+from botocore.exceptions import ClientError
 from PIL import Image
 import requests
 from io import BytesIO
 import zipfile
 import re
+import os
 
 # ─────────────────────────────────────────────
-# Cloudinary config (from Streamlit secrets)
+# Page config
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="Link → Image ZIP (S3)", page_icon="📦", layout="centered")
+st.title("📦 Image Downloader → ZIP + Company S3")
+
+# ─────────────────────────────────────────────
+# Load secrets
 # ─────────────────────────────────────────────
 try:
-    cloudinary.config(
-        cloud_name=st.secrets["CLOUDINARY_CLOUD_NAME"],
-        api_key=st.secrets["CLOUDINARY_API_KEY"],
-        api_secret=st.secrets["CLOUDINARY_API_SECRET"],
-        secure=True,
-    )
+    AWS_ACCESS_KEY_ID = st.secrets["AWS_ACCESS_KEY_ID"]
+    AWS_SECRET_ACCESS_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
+    AWS_REGION = st.secrets.get("AWS_REGION", "eu-west-1")
+    S3_BUCKET = st.secrets["S3_BUCKET"]
+    S3_PREFIX = st.secrets.get("S3_PREFIX", "streamlit")
+    PUBLIC_BASE_URL = st.secrets["PUBLIC_BASE_URL"]
 except Exception:
-    st.error("❌ Cloudinary secrets not found. Please configure secrets.toml")
+    st.error("❌ Missing AWS S3 secrets. Check `.streamlit/secrets.toml`.")
     st.stop()
 
-st.set_page_config(page_title="Link → Image ZIP", page_icon="📦", layout="centered")
-st.title("📦 Image Downloader → ZIP + Cloudinary")
+# ─────────────────────────────────────────────
+# S3 client
+# ─────────────────────────────────────────────
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION,
+)
 
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
 def sanitize_filename(name: str) -> str:
-    return re.sub(r'[^A-Za-z0-9_\- ]', '_', name).strip() or "image"
+    return re.sub(r'[^A-Za-z0-9_\-]', '_', name).strip() or "image"
+
+def upload_to_s3(file_bytes: bytes, filename: str) -> str:
+    key = f"{S3_PREFIX}/{filename}"
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=file_bytes,
+        ContentType="image/jpeg",
+        ACL="public-read"
+    )
+    return f"{PUBLIC_BASE_URL}/{filename}"
 
 # ─────────────────────────────────────────────
-# Upload file
+# Upload CSV / XLSX
 # ─────────────────────────────────────────────
 uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
 
 if uploaded:
-    if uploaded.name.lower().endswith(".csv"):
-        df = pd.read_csv(uploaded)
-    else:
-        df = pd.read_excel(uploaded)
+    df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
 
     st.subheader("📌 Columns detected")
     st.json(list(df.columns))
@@ -50,28 +71,19 @@ if uploaded:
     url_col = st.selectbox("Select image URL column", df.columns)
 
     if st.button("🚀 Process Images"):
-
         zip_buffer = BytesIO()
-
-        # IMPORTANT: pre-size list to avoid ValueError
-        cloud_urls = [None] * len(df)
-        success_count = 0
+        server_urls = [None] * len(df)
+        success = 0
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-
-            # ─────────────────────────────────────────────
-            # ✅ CORRECTED LOOP (INDEX-BASED – SAFE)
-            # ─────────────────────────────────────────────
             for idx, row in df.iterrows():
                 product = str(row[product_col]).strip()
                 url = str(row[url_col]).strip()
 
                 if not url.startswith("http"):
-                    cloud_urls[idx] = None
                     continue
 
                 try:
-                    # Download image
                     r = requests.get(url, timeout=20)
                     r.raise_for_status()
 
@@ -79,46 +91,24 @@ if uploaded:
                     if img.mode == "RGBA":
                         img = img.convert("RGB")
 
-                    filename = sanitize_filename(product)
+                    filename = sanitize_filename(product) + ".jpg"
 
-                    # Upload to Cloudinary (FORCE JPG)
-                    upload_res = cloudinary.uploader.upload(
-                        BytesIO(r.content),
-                        folder="Products",
-                        public_id=filename,
-                        overwrite=True,
-                        resource_type="image",
-                        format="jpg",
-                        use_filename=True,
-                        unique_filename=False,
-                    )
-
-                    # Build DOWNLOAD-ALLOWED URL
-                    cloud_url = CloudinaryImage(upload_res["public_id"]).build_url(
-                        secure=True,
-                        format="jpg",
-                        flags="attachment",
-                    )
-
-                    cloud_urls[idx] = cloud_url
-
-                    # Add image to ZIP
                     img_bytes = BytesIO()
                     img.save(img_bytes, "JPEG", quality=90)
                     img_bytes.seek(0)
 
-                    zipf.writestr(filename + ".jpg", img_bytes.getvalue())
-                    success_count += 1
+                    public_url = upload_to_s3(img_bytes.getvalue(), filename)
+                    server_urls[idx] = public_url
 
-                except Exception:
-                    cloud_urls[idx] = None
+                    zipf.writestr(filename, img_bytes.getvalue())
+                    success += 1
 
-        # ─────────────────────────────────────────────
-        # Save results
-        # ─────────────────────────────────────────────
-        df["Cloudinary URL"] = cloud_urls
+                except Exception as e:
+                    server_urls[idx] = None
 
-        st.success(f"🎉 Done! {success_count} images processed.")
+        df["Image URL (Server)"] = server_urls
+
+        st.success(f"🎉 Done! {success} images uploaded to company server.")
 
         st.download_button(
             "⬇️ Download Images ZIP",
@@ -130,6 +120,6 @@ if uploaded:
         st.download_button(
             "⬇️ Download Updated CSV",
             data=df.to_csv(index=False).encode("utf-8"),
-            file_name="updated_with_cloudinary.csv",
+            file_name="updated_with_server_links.csv",
             mime="text/csv",
         )
