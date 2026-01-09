@@ -25,16 +25,24 @@ try:
     AWS_ACCESS_KEY = st.secrets["AWS_ACCESS_KEY_ID"]
     AWS_SECRET_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
     S3_BUCKET = st.secrets["S3_BUCKET"]
+
+    # Fixed values
     S3_PREFIX = "streamlit/"
     PUBLIC_BASE_URL = "https://static.ora.ma/streamlit/"
+    AWS_REGION = "eu-west-3"  # ✅ REQUIRED
+
 except Exception:
-    st.error("❌ Missing AWS secrets in Streamlit")
+    st.error("❌ Missing AWS / S3 secrets in Streamlit")
     st.stop()
 
+# ─────────────────────────────────────────────
+# S3 CLIENT (REGION ADDED)
+# ─────────────────────────────────────────────
 s3 = boto3.client(
     "s3",
     aws_access_key_id=AWS_ACCESS_KEY,
     aws_secret_access_key=AWS_SECRET_KEY,
+    region_name=AWS_REGION,  # ✅ FIX
 )
 
 # ─────────────────────────────────────────────
@@ -99,7 +107,7 @@ if uploaded:
                     if img.mode == "RGBA":
                         img = img.convert("RGB")
 
-                    # SAVE JPG
+                    # SAVE JPG IN MEMORY
                     img_bytes = BytesIO()
                     img.save(img_bytes, "JPEG", quality=90)
                     img_bytes.seek(0)
@@ -123,7 +131,7 @@ if uploaded:
 
                     uploaded_count += 1
 
-                except Exception as e:
+                except Exception:
                     skipped_count += 1
                     server_urls[idx] = None
 
