@@ -12,12 +12,12 @@ import traceback
 # Streamlit Config
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Image → ZIP + Server (DEBUG)",
-    page_icon="🪵",
+    page_title="Image → ZIP + Server",
+    page_icon="📦",
     layout="centered",
 )
 
-st.title("🪵 Image Downloader → Company Server (DEBUG MODE)")
+st.title("📦 Image Downloader → Company Server")
 
 # ─────────────────────────────────────────────
 # S3 CONFIG (FROM SECRETS)
@@ -29,14 +29,14 @@ try:
     AWS_SECRET_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
     S3_BUCKET = st.secrets["S3_BUCKET"]
 
+    AWS_REGION = "eu-west-3"
     S3_PREFIX = "streamlit/"
     PUBLIC_BASE_URL = "https://static.ora.ma/streamlit/"
-    AWS_REGION = "eu-west-3"
 
-    st.success("✅ Secrets loaded successfully")
+    st.success("✅ Secrets loaded")
 
 except Exception as e:
-    st.error("❌ Missing AWS / S3 secrets")
+    st.error("❌ Missing AWS/S3 secrets")
     st.exception(e)
     st.stop()
 
@@ -52,7 +52,7 @@ try:
         aws_secret_access_key=AWS_SECRET_KEY,
         region_name=AWS_REGION,
     )
-    st.success("✅ S3 client created")
+    st.success("✅ S3 client ready")
 
 except Exception as e:
     st.error("❌ Failed to create S3 client")
@@ -76,7 +76,7 @@ BROWSER_HEADERS = {
     "Referer": "https://glovoapp.com/",
 }
 
-st.write("🌐 Browser headers:", BROWSER_HEADERS)
+st.write("🌐 Using browser headers")
 
 # ─────────────────────────────────────────────
 # FILE UPLOAD
@@ -84,7 +84,7 @@ st.write("🌐 Browser headers:", BROWSER_HEADERS)
 uploaded = st.file_uploader("📤 Upload CSV or XLSX", type=["csv", "xlsx"])
 
 if uploaded:
-    st.write("📄 File uploaded:", uploaded.name)
+    st.write("📄 Uploaded file:", uploaded.name)
 
     try:
         if uploaded.name.lower().endswith(".csv"):
@@ -92,7 +92,7 @@ if uploaded:
         else:
             df = pd.read_excel(uploaded)
 
-        st.success("✅ File loaded into DataFrame")
+        st.success("✅ File loaded")
 
     except Exception as e:
         st.error("❌ Failed to read file")
@@ -105,9 +105,8 @@ if uploaded:
     product_col = st.selectbox("Select product column", df.columns)
     url_col = st.selectbox("Select image URL column", df.columns)
 
-    if st.button("🚀 Process Images (DEBUG)"):
+    if st.button("🚀 Process Images"):
 
-        st.write("▶️ Starting processing...")
         zip_buffer = BytesIO()
         server_urls = [None] * len(df)
 
@@ -117,8 +116,8 @@ if uploaded:
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
             for idx, row in df.iterrows():
-                st.write(f"────────────────────────")
-                st.write(f"🔎 ROW {idx}")
+                st.write("────────────────────────")
+                st.write(f"🔎 Row {idx}")
 
                 try:
                     product = str(row[product_col]).strip()
@@ -135,61 +134,48 @@ if uploaded:
                     filename = sanitize_filename(product) + ".jpg"
                     s3_key = S3_PREFIX + filename
 
-                    st.write("🧾 Filename:", filename)
-                    st.write("📂 S3 Key:", s3_key)
-
-                    # ───── DOWNLOAD IMAGE ─────
+                    # ─── DOWNLOAD IMAGE ───
                     st.write("⬇️ Downloading image...")
                     r = requests.get(url, headers=BROWSER_HEADERS, timeout=25)
 
-                    st.write("🌐 HTTP status:", r.status_code)
-                    st.write("📦 Content-Type:", r.headers.get("Content-Type"))
-
+                    st.write("HTTP:", r.status_code, "| Content-Type:", r.headers.get("Content-Type"))
                     r.raise_for_status()
 
                     img = Image.open(BytesIO(r.content))
-                    st.write("🖼 Image format:", img.format, "| mode:", img.mode)
+                    st.write("Image mode:", img.mode)
 
                     if img.mode == "RGBA":
                         img = img.convert("RGB")
-                        st.write("🎨 Converted RGBA → RGB")
+                        st.write("Converted RGBA → RGB")
 
-                    # ───── SAVE JPG ─────
                     img_bytes = BytesIO()
                     img.save(img_bytes, "JPEG", quality=90)
                     img_bytes.seek(0)
 
-                    st.write("💾 Image converted to JPG in memory")
-
-                    # ───── UPLOAD TO S3 ─────
-                    st.write("☁️ Uploading to S3...")
-
+                    # ─── UPLOAD TO S3 (NO ACL) ───
+                    st.write("☁️ Uploading to server...")
                     s3.upload_fileobj(
                         img_bytes,
                         S3_BUCKET,
                         s3_key,
                         ExtraArgs={
                             "ContentType": "image/jpeg",
-                            "ACL": "public-read",
                         },
                     )
 
                     public_url = PUBLIC_BASE_URL + filename
                     server_urls[idx] = public_url
 
-                    st.success(f"✅ Uploaded to: {public_url}")
+                    st.success(f"✅ Uploaded → {public_url}")
 
-                    # ───── ADD TO ZIP ─────
+                    # ─── ZIP ───
                     zipf.writestr(filename, img_bytes.getvalue())
-                    st.write("📦 Added to ZIP")
-
                     uploaded_count += 1
 
-                except Exception as e:
+                except Exception:
                     skipped_count += 1
                     server_urls[idx] = None
-
-                    st.error("❌ ERROR on this row")
+                    st.error("❌ Error on this row")
                     st.text(traceback.format_exc())
 
         df["Server Image URL"] = server_urls
