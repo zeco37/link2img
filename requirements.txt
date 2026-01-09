@@ -4,3 +4,4 @@ cloudinary
 Pillow
 requests
 openpyxl
+boto3
