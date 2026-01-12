@@ -6,7 +6,7 @@ from PIL import Image
 from io import BytesIO
 import zipfile
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 # ─────────────────────────────────────────────
@@ -18,7 +18,20 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("📦 Image Downloader → Company Server")
+# ─────────────────────────────────────────────
+# SESSION INIT
+# ─────────────────────────────────────────────
+if "USER_LOGS" not in st.session_state:
+    st.session_state.USER_LOGS = []
+
+if "ADMIN_LOGS" not in st.session_state:
+    st.session_state.ADMIN_LOGS = []
+
+# ─────────────────────────────────────────────
+# SAFE TIME
+# ─────────────────────────────────────────────
+def utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 # ─────────────────────────────────────────────
 # USER IDENTIFICATION (SAFE)
@@ -31,26 +44,23 @@ def get_user_email():
 
 USER_EMAIL = get_user_email()
 SESSION_ID = str(uuid.uuid4())[:8]
-SESSION_TIME = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-st.caption(f"👤 **User:** {USER_EMAIL} | 🕒 {SESSION_TIME} | 🔑 Session `{SESSION_ID}`")
+SESSION_TIME = utc_now()
 
 # ─────────────────────────────────────────────
 # ADMIN CONFIG
 # ─────────────────────────────────────────────
 ADMIN_EMAILS = st.secrets.get("ADMIN_EMAILS", [])
-
 IS_ADMIN = USER_EMAIL in ADMIN_EMAILS
 
 # ─────────────────────────────────────────────
-# ADMIN LOG STORAGE (GLOBAL)
+# LOG HELPERS
 # ─────────────────────────────────────────────
-if "ADMIN_LOGS" not in st.session_state:
-    st.session_state.ADMIN_LOGS = []
+def user_log(msg, level="info"):
+    st.session_state.USER_LOGS.append((level, msg))
 
-def add_admin_log(action, details):
+def admin_log(action, details):
     st.session_state.ADMIN_LOGS.append({
-        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "time": utc_now(),
         "user": USER_EMAIL,
         "session": SESSION_ID,
         "action": action,
@@ -58,16 +68,23 @@ def add_admin_log(action, details):
     })
 
 # ─────────────────────────────────────────────
-# SIDEBAR – ADMIN ONLY
+# SIDEBAR (LEFT PANEL)
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Control Panel")
 
-    if IS_ADMIN:
-        st.markdown("### 🛡 Admin Logs")
-        show_admin_logs = st.toggle("Show admin activity")
+    MODE = st.radio(
+        "Mode",
+        ["User mode"] + (["Admin mode"] if IS_ADMIN else []),
+    )
 
-        if show_admin_logs:
+    st.markdown("---")
+
+    show_logs = st.toggle("Show logs", value=True)
+
+    if MODE == "Admin mode":
+        st.markdown("### 🛡 Admin Logs")
+        if show_logs:
             for log in reversed(st.session_state.ADMIN_LOGS):
                 st.markdown(
                     f"""
@@ -79,8 +96,23 @@ with st.sidebar:
                     ---
                     """
                 )
+
     else:
-        st.info("👤 User mode")
+        st.markdown("### 👤 User Logs")
+        if show_logs:
+            for level, msg in st.session_state.USER_LOGS:
+                if level == "error":
+                    st.error(msg)
+                elif level == "success":
+                    st.success(msg)
+                else:
+                    st.info(msg)
+
+# ─────────────────────────────────────────────
+# MAIN UI
+# ─────────────────────────────────────────────
+st.title("📦 Image Downloader → Company Server")
+st.caption(f"👤 {USER_EMAIL} | 🕒 {SESSION_TIME} | 🔑 {SESSION_ID}")
 
 # ─────────────────────────────────────────────
 # S3 CONFIG
@@ -116,8 +148,7 @@ uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
 
 if uploaded:
     df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
-
-    add_admin_log("CSV uploaded", uploaded.name)
+    admin_log("CSV uploaded", uploaded.name)
 
     st.subheader("📌 Columns detected")
     st.json(list(df.columns))
@@ -126,6 +157,7 @@ if uploaded:
     url_col = st.selectbox("Image URL column", df.columns)
 
     if st.button("🚀 Process Images"):
+        user_log("Starting image processing…")
         session_folder = f"streamlit/{SESSION_ID}/"
         zip_buffer = BytesIO()
         server_urls = [None] * len(df)
@@ -134,26 +166,30 @@ if uploaded:
         skipped_count = 0
 
         progress = st.progress(0.0)
-        status_box = st.empty()
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
             for idx, row in df.iterrows():
                 progress.progress((idx + 1) / len(df))
-
                 product = str(row[product_col])
                 url = str(row[url_col])
 
-                status_box.info(f"Processing: {product}")
+                user_log(f"Row {idx+1}: {product}")
 
                 if not url.startswith("http"):
+                    user_log("Invalid URL → skipped", "error")
                     skipped_count += 1
                     continue
 
                 try:
                     r = requests.get(url, headers=HEADERS, timeout=20)
+                    user_log(f"HTTP {r.status_code}")
+
                     r.raise_for_status()
 
-                    img = Image.open(BytesIO(r.content)).convert("RGB")
+                    img = Image.open(BytesIO(r.content))
+                    user_log(f"Image opened | mode={img.mode}")
+
+                    img = img.convert("RGB")
 
                     img_buffer = BytesIO()
                     img.save(img_buffer, "JPEG", quality=90)
@@ -169,20 +205,23 @@ if uploaded:
                         ExtraArgs={"ContentType": "image/jpeg"},
                     )
 
-                    public_url = PUBLIC_BASE_URL + SESSION_ID + "/" + filename
+                    public_url = f"{PUBLIC_BASE_URL}{SESSION_ID}/{filename}"
                     server_urls[idx] = public_url
 
                     zipf.writestr(filename, img_buffer.getvalue())
+
+                    user_log(f"Uploaded → {public_url}", "success")
                     uploaded_count += 1
 
-                except Exception:
+                except Exception as e:
+                    user_log(f"FAILED: {str(e)}", "error")
                     skipped_count += 1
 
         df["Server Image URL"] = server_urls
 
-        add_admin_log(
-            "Processing completed",
-            f"Uploaded: {uploaded_count}, Skipped: {skipped_count}, Output: updated_with_links.csv",
+        admin_log(
+            "Processing finished",
+            f"Uploaded={uploaded_count}, Skipped={skipped_count}, Output CSV generated",
         )
 
         st.success(f"🎉 Uploaded: {uploaded_count} | Skipped: {skipped_count}")
