@@ -6,6 +6,7 @@ from PIL import Image
 from io import BytesIO
 import zipfile
 import re
+from datetime import datetime
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -17,36 +18,44 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-# SIDEBAR – LOGS PANEL
+# SIDEBAR – TECHNICAL LOGS
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🧾 Processing Logs")
+    st.markdown("## 🧾 Technical Logs")
     show_logs = st.toggle("Show logs", value=False)
-    log_container = st.container()
+    log_box = st.container()
 
-def log(message: str):
+def log(msg):
     if show_logs:
-        log_container.markdown(message)
+        log_box.markdown(msg)
 
 # ─────────────────────────────────────────────
-# HEADER
+# USER IDENTITY (STREAMLIT CLOUD)
 # ─────────────────────────────────────────────
-st.markdown("## 📦 Image Downloader → Company Server")
-st.caption("Upload CSV/XLSX → host images on company server → export ZIP & CSV")
-st.divider()
+user_email = (
+    st.experimental_user.email
+    if hasattr(st, "experimental_user") and st.experimental_user.email
+    else "unknown@user"
+)
 
 # ─────────────────────────────────────────────
-# LOAD SECRETS (STREAMLIT CLOUD)
+# ADMIN USERS
 # ─────────────────────────────────────────────
-try:
-    AWS_ACCESS_KEY = st.secrets["AWS_ACCESS_KEY_ID"]
-    AWS_SECRET_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
-    S3_BUCKET = st.secrets["S3_BUCKET"]
-except Exception:
-    st.error("❌ AWS secrets are missing in Streamlit")
-    st.stop()
+ADMINS = ["wally@ora.ma"]
 
-S3_PREFIX = "streamlit/"
+# ─────────────────────────────────────────────
+# ADMIN ACTIVITY LOG (IN-MEMORY)
+# ─────────────────────────────────────────────
+if "admin_logs" not in st.session_state:
+    st.session_state.admin_logs = []
+
+# ─────────────────────────────────────────────
+# LOAD SECRETS
+# ─────────────────────────────────────────────
+AWS_ACCESS_KEY = st.secrets["AWS_ACCESS_KEY_ID"]
+AWS_SECRET_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
+S3_BUCKET = st.secrets["S3_BUCKET"]
+
 PUBLIC_BASE_URL = "https://static.ora.ma/streamlit/"
 
 # ─────────────────────────────────────────────
@@ -62,7 +71,7 @@ s3 = boto3.client(
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
-def sanitize_filename(name: str) -> str:
+def sanitize_filename(name):
     return re.sub(r"[^A-Za-z0-9_-]", "_", name).strip() or "image"
 
 HEADERS = {
@@ -72,9 +81,16 @@ HEADERS = {
 }
 
 # ─────────────────────────────────────────────
+# UI HEADER
+# ─────────────────────────────────────────────
+st.title("📦 Image Downloader → Company Server")
+st.caption(f"👤 Logged as **{user_email}**")
+st.divider()
+
+# ─────────────────────────────────────────────
 # FILE UPLOAD
 # ─────────────────────────────────────────────
-uploaded = st.file_uploader("📄 Upload CSV or XLSX", type=["csv", "xlsx"])
+uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
 
 if uploaded:
     df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
@@ -87,6 +103,9 @@ if uploaded:
 
     if st.button("🚀 Process Images", type="primary"):
 
+        session_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        folder_prefix = f"uploads/{session_id}/"
+
         zip_buffer = BytesIO()
         server_urls = [None] * len(df)
 
@@ -95,13 +114,12 @@ if uploaded:
 
         progress = st.progress(0)
         status = st.empty()
-        total = len(df)
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
             for i, (idx, row) in enumerate(df.iterrows()):
-                progress.progress((i + 1) / total)
-                status.info(f"Processing image {i + 1} / {total}")
+                progress.progress((i + 1) / len(df))
+                status.info(f"Processing image {i + 1} / {len(df)}")
 
                 product = str(row[product_col]).strip()
                 url = str(row[url_col]).strip()
@@ -109,7 +127,7 @@ if uploaded:
                 log(f"""
 ---
 ### 🔹 Row {idx + 1}
-📦 **Product:** `{product}`  
+📦 **Product:** `{product}`
 🔗 **URL:** {url}
 """)
 
@@ -119,10 +137,9 @@ if uploaded:
                     continue
 
                 filename = sanitize_filename(product) + ".jpg"
-                s3_key = S3_PREFIX + filename
+                s3_key = folder_prefix + filename
 
                 try:
-                    # DOWNLOAD IMAGE
                     log("⬇️ Downloading image…")
                     r = requests.get(url, headers=HEADERS, timeout=25)
                     r.raise_for_status()
@@ -133,52 +150,87 @@ if uploaded:
                     if img.mode != "RGB":
                         img = img.convert("RGB")
 
-                    # CREATE JPEG BYTES ONCE
-                    jpeg_bytes = BytesIO()
-                    img.save(jpeg_bytes, "JPEG", quality=90)
-                    jpeg_bytes.seek(0)
+                    img_bytes = BytesIO()
+                    img.save(img_bytes, "JPEG", quality=90)
+                    img_bytes.seek(0)
 
-                    # UPLOAD TO S3 (SEPARATE BUFFER)
                     log("☁️ Uploading to server…")
-                    s3_buffer = BytesIO(jpeg_bytes.getvalue())
                     s3.upload_fileobj(
-                        s3_buffer,
+                        BytesIO(img_bytes.getvalue()),
                         S3_BUCKET,
                         s3_key,
                         ExtraArgs={"ContentType": "image/jpeg"},
                     )
 
-                    public_url = PUBLIC_BASE_URL + filename
+                    public_url = PUBLIC_BASE_URL + s3_key
                     server_urls[idx] = public_url
                     uploaded_count += 1
 
-                    log(f"✅ **Uploaded successfully**  \n🔗 {public_url}")
-
-                    # ADD TO ZIP (SEPARATE BUFFER)
-                    zipf.writestr(filename, jpeg_bytes.getvalue())
+                    zipf.writestr(filename, img_bytes.getvalue())
+                    log(f"✅ Uploaded → {public_url}")
 
                 except Exception as e:
                     skipped_count += 1
-                    server_urls[idx] = None
-                    log(f"❌ **Error**  \n`{e}`")
+                    log(f"❌ Error: `{e}`")
 
-        # ─────────────────────────────────────────────
-        # SAVE RESULTS
-        # ─────────────────────────────────────────────
         df["Server Image URL"] = server_urls
 
+        # ─────────────────────────────────────────────
+        # ADMIN ACTIVITY ENTRY (IN-APP ONLY)
+        # ─────────────────────────────────────────────
+        st.session_state.admin_logs.append({
+            "user": user_email,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "csv_uploaded": uploaded.name,
+            "product_column": product_col,
+            "url_column": url_col,
+            "uploaded": uploaded_count,
+            "skipped": skipped_count,
+            "zip": True,
+            "csv": True,
+        })
+
+        # ─────────────────────────────────────────────
+        # RESULTS
+        # ─────────────────────────────────────────────
         st.success(f"🎉 Uploaded: {uploaded_count} | Skipped: {skipped_count}")
 
         st.download_button(
             "⬇️ Download Images ZIP",
-            data=zip_buffer.getvalue(),
-            file_name="images.zip",
-            mime="application/zip",
+            zip_buffer.getvalue(),
+            "images.zip",
+            "application/zip",
         )
 
         st.download_button(
             "⬇️ Download Updated CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="updated_with_server_links.csv",
-            mime="text/csv",
+            df.to_csv(index=False).encode("utf-8"),
+            "updated_with_server_links.csv",
+            "text/csv",
         )
+
+# ─────────────────────────────────────────────
+# ADMIN ACTIVITY PANEL (UI ONLY)
+# ─────────────────────────────────────────────
+if user_email in ADMINS:
+    st.divider()
+    st.markdown("## 🛡️ Admin Activity Log")
+
+    if not st.session_state.admin_logs:
+        st.info("No activity yet.")
+    else:
+        for i, entry in enumerate(reversed(st.session_state.admin_logs), start=1):
+            with st.expander(f"📌 Session {i} — {entry['user']}"):
+                st.markdown(f"""
+**👤 User:** {entry['user']}  
+**🕒 Time:** {entry['time']}  
+**📄 Uploaded CSV:** `{entry['csv_uploaded']}`  
+**📌 Product Column:** `{entry['product_column']}`  
+**🖼 Image URL Column:** `{entry['url_column']}`  
+
+**⬆ Uploaded Images:** {entry['uploaded']}  
+**⚠ Skipped Images:** {entry['skipped']}  
+
+**📦 ZIP Generated:** ✅  
+**📑 CSV Generated:** ✅  
+""")
