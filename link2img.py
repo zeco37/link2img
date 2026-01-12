@@ -11,62 +11,40 @@ import re
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Image → ZIP + Server",
+    page_title="Image → ZIP & Server",
     page_icon="📦",
-    layout="wide",
+    layout="centered",
 )
 
-# ─────────────────────────────────────────────
-# STYLE (UI POLISH)
-# ─────────────────────────────────────────────
-st.markdown(
-    """
-    <style>
-    .block-container {
-        padding-top: 2.5rem;
-        max-width: 1200px;
-    }
-    .stButton>button {
-        border-radius: 10px;
-        padding: 0.6rem 1.4rem;
-        font-weight: 600;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+st.title("📦 Image Downloader → Company Server")
 
 # ─────────────────────────────────────────────
-# HEADER
+# OPTIONAL LOGS TOGGLE
 # ─────────────────────────────────────────────
-st.markdown("## 📦 Image Processing Tool")
-st.caption("Upload images from URLs → host on company server → export ZIP & CSV")
-st.divider()
-
-# ─────────────────────────────────────────────
-# LOG TOGGLE
-# ─────────────────────────────────────────────
-show_logs = st.toggle("📋 Show logs", value=False)
-log_box = st.container() if show_logs else None
+show_logs = st.toggle("🧾 Show logs", value=False)
+log_area = st.empty()
 
 def log(msg):
-    if log_box:
-        log_box.write(msg)
+    if show_logs:
+        log_area.markdown(msg)
 
 # ─────────────────────────────────────────────
-# S3 CONFIG (EU-WEST-3)
+# LOAD SECRETS (STREAMLIT CLOUD)
 # ─────────────────────────────────────────────
 try:
     AWS_ACCESS_KEY = st.secrets["AWS_ACCESS_KEY_ID"]
     AWS_SECRET_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
     S3_BUCKET = st.secrets["S3_BUCKET"]
 except Exception:
-    st.error("❌ AWS credentials missing in secrets.toml")
+    st.error("❌ Missing AWS secrets in Streamlit")
     st.stop()
 
 S3_PREFIX = "streamlit/"
 PUBLIC_BASE_URL = "https://static.ora.ma/streamlit/"
 
+# ─────────────────────────────────────────────
+# S3 CLIENT (EU-WEST-3 = PARIS)
+# ─────────────────────────────────────────────
 s3 = boto3.client(
     "s3",
     region_name="eu-west-3",
@@ -82,113 +60,113 @@ def sanitize_filename(name: str) -> str:
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
+    "Accept": "image/*,*/*;q=0.8",
     "Referer": "https://glovoapp.com/",
 }
 
 # ─────────────────────────────────────────────
 # FILE UPLOAD
 # ─────────────────────────────────────────────
-col1, col2 = st.columns([2, 1])
+uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
 
-with col1:
-    uploaded = st.file_uploader("📄 Upload CSV or XLSX", type=["csv", "xlsx"])
+if uploaded:
+    df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
 
-with col2:
-    st.info("✔ Bulk image processing\n✔ Secure server hosting\n✔ ZIP + CSV export")
+    st.subheader("📌 Columns detected")
+    st.json(list(df.columns))
 
-if not uploaded:
-    st.info("⬆ Upload a file to get started.")
-    st.stop()
+    product_col = st.selectbox("Select product column", df.columns)
+    url_col = st.selectbox("Select image URL column", df.columns)
 
-# ─────────────────────────────────────────────
-# LOAD FILE
-# ─────────────────────────────────────────────
-df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
+    if st.button("🚀 Process Images"):
+        zip_buffer = BytesIO()
+        server_urls = [None] * len(df)
 
-st.subheader("📌 Columns detected")
-st.json(list(df.columns))
+        uploaded_count = 0
+        skipped_count = 0
 
-product_col = st.selectbox("Product name column", df.columns)
-url_col = st.selectbox("Image URL column", df.columns)
+        progress = st.progress(0)
+        total = len(df)
 
-# ─────────────────────────────────────────────
-# PROCESS BUTTON
-# ─────────────────────────────────────────────
-if st.button("🚀 Process Images", type="primary"):
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
 
-    zip_buffer = BytesIO()
-    server_urls = [None] * len(df)
+            for i, (idx, row) in enumerate(df.iterrows()):
+                progress.progress((i + 1) / total)
 
-    uploaded_count = 0
-    skipped_count = 0
+                product = str(row[product_col]).strip()
+                url = str(row[url_col]).strip()
 
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+                log(f"### 🔹 Row {idx + 1}")
+                log(f"📦 Product: `{product}`")
+                log(f"🔗 URL: {url}")
 
-        for idx, row in df.iterrows():
-            product = str(row[product_col]).strip()
-            url = str(row[url_col]).strip()
+                if not url.startswith("http"):
+                    skipped_count += 1
+                    log("⚠️ Skipped (invalid URL)")
+                    continue
 
-            log(f"🔹 Row {idx+1}: {product}")
+                filename = sanitize_filename(product) + ".jpg"
+                s3_key = S3_PREFIX + filename
 
-            if not url.startswith("http"):
-                log("⛔ Invalid URL")
-                skipped_count += 1
-                continue
+                try:
+                    # DOWNLOAD
+                    log("⬇️ Downloading image...")
+                    r = requests.get(url, headers=HEADERS, timeout=25)
+                    r.raise_for_status()
 
-            filename = sanitize_filename(product) + ".jpg"
-            s3_key = S3_PREFIX + filename
+                    img = Image.open(BytesIO(r.content))
+                    log(f"🖼️ Image mode: `{img.mode}`")
 
-            try:
-                log("⬇ Downloading image...")
-                r = requests.get(url, headers=HEADERS, timeout=25)
-                r.raise_for_status()
+                    if img.mode == "RGBA":
+                        img = img.convert("RGB")
 
-                img = Image.open(BytesIO(r.content))
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
+                    # CREATE JPEG BYTES ONCE
+                    jpeg_bytes = BytesIO()
+                    img.save(jpeg_bytes, "JPEG", quality=90)
+                    jpeg_bytes.seek(0)
 
-                img_bytes = BytesIO()
-                img.save(img_bytes, "JPEG", quality=90)
-                img_bytes.seek(0)
+                    # UPLOAD TO S3 (COPY BUFFER)
+                    log("☁️ Uploading to S3...")
+                    s3_buffer = BytesIO(jpeg_bytes.getvalue())
+                    s3.upload_fileobj(
+                        s3_buffer,
+                        S3_BUCKET,
+                        s3_key,
+                        ExtraArgs={"ContentType": "image/jpeg"},
+                    )
 
-                log("☁ Uploading to S3...")
-                s3.upload_fileobj(
-                    img_bytes,
-                    S3_BUCKET,
-                    s3_key,
-                    ExtraArgs={"ContentType": "image/jpeg"},
-                )
+                    public_url = PUBLIC_BASE_URL + filename
+                    server_urls[idx] = public_url
+                    uploaded_count += 1
 
-                server_url = PUBLIC_BASE_URL + filename
-                server_urls[idx] = server_url
+                    log(f"✅ Uploaded → {public_url}")
 
-                # ZIP requires fresh buffer
-                zipf.writestr(filename, img_bytes.getvalue())
+                    # ADD TO ZIP (SEPARATE COPY)
+                    zip_buffer_local = BytesIO(jpeg_bytes.getvalue())
+                    zipf.writestr(filename, zip_buffer_local.getvalue())
 
-                uploaded_count += 1
-                log(f"✅ Uploaded → {server_url}")
+                except Exception as e:
+                    skipped_count += 1
+                    server_urls[idx] = None
+                    log(f"❌ Error: `{e}`")
 
-            except Exception as e:
-                skipped_count += 1
-                log(f"❌ Error: {e}")
+        # ─────────────────────────────────────────────
+        # SAVE RESULTS
+        # ─────────────────────────────────────────────
+        df["Server Image URL"] = server_urls
 
-    # ─────────────────────────────────────────────
-    # SAVE RESULTS
-    # ─────────────────────────────────────────────
-    df["Server Image URL"] = server_urls
+        st.success(f"🎉 Uploaded: {uploaded_count} | Skipped: {skipped_count}")
 
-    st.success(f"🎉 Uploaded: {uploaded_count} | Skipped: {skipped_count}")
+        st.download_button(
+            "⬇️ Download Images ZIP",
+            data=zip_buffer.getvalue(),
+            file_name="images.zip",
+            mime="application/zip",
+        )
 
-    st.download_button(
-        "⬇️ Download Images ZIP",
-        data=zip_buffer.getvalue(),
-        file_name="images.zip",
-        mime="application/zip",
-    )
-
-    st.download_button(
-        "⬇️ Download Updated CSV",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name="updated_with_server_links.csv",
-        mime="text/csv",
-    )
+        st.download_button(
+            "⬇️ Download Updated CSV",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name="updated_with_server_links.csv",
+            mime="text/csv",
+        )
