@@ -23,67 +23,73 @@ st.title("📦 Image Downloader → Company Server")
 # ─────────────────────────────────────────────
 # USER IDENTIFICATION (SAFE)
 # ─────────────────────────────────────────────
-def get_user_identity():
+def get_user_email():
     try:
         return st.user.email
     except Exception:
         return "unknown@user"
 
-USER_EMAIL = get_user_identity()
+USER_EMAIL = get_user_email()
 SESSION_ID = str(uuid.uuid4())[:8]
 SESSION_TIME = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 st.caption(f"👤 **User:** {USER_EMAIL} | 🕒 {SESSION_TIME} | 🔑 Session `{SESSION_ID}`")
 
 # ─────────────────────────────────────────────
-# ADMIN LOG STORAGE (SESSION)
+# ADMIN CONFIG
+# ─────────────────────────────────────────────
+ADMIN_EMAILS = st.secrets.get("ADMIN_EMAILS", [])
+
+IS_ADMIN = USER_EMAIL in ADMIN_EMAILS
+
+# ─────────────────────────────────────────────
+# ADMIN LOG STORAGE (GLOBAL)
 # ─────────────────────────────────────────────
 if "ADMIN_LOGS" not in st.session_state:
     st.session_state.ADMIN_LOGS = []
 
-def admin_log(event, details="", level="INFO"):
+def add_admin_log(action, details):
     st.session_state.ADMIN_LOGS.append({
         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "user": USER_EMAIL,
         "session": SESSION_ID,
-        "level": level,
-        "event": event,
+        "action": action,
         "details": details,
     })
 
 # ─────────────────────────────────────────────
-# SIDEBAR – LOG PANEL
+# SIDEBAR – ADMIN ONLY
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🛡 Admin Panel")
-    show_logs = st.toggle("Show logs")
+    st.markdown("## ⚙️ Control Panel")
 
-    if show_logs:
-        st.markdown("### 📜 Activity Logs")
-        for log in reversed(st.session_state.ADMIN_LOGS):
-            icon = {"INFO": "🟦", "ERROR": "🟥"}.get(log["level"], "⬜")
-            st.markdown(
-                f"""
-                {icon} **{log['time']}**  
-                👤 `{log['user']}`  
-                🔁 **{log['event']}**  
-                📝 {log['details']}
-                ---
-                """
-            )
+    if IS_ADMIN:
+        st.markdown("### 🛡 Admin Logs")
+        show_admin_logs = st.toggle("Show admin activity")
+
+        if show_admin_logs:
+            for log in reversed(st.session_state.ADMIN_LOGS):
+                st.markdown(
+                    f"""
+                    🕒 **{log['time']}**  
+                    👤 `{log['user']}`  
+                    🔑 `{log['session']}`  
+                    🔁 **{log['action']}**  
+                    📝 {log['details']}
+                    ---
+                    """
+                )
+    else:
+        st.info("👤 User mode")
 
 # ─────────────────────────────────────────────
-# S3 CONFIG (FROM STREAMLIT SECRETS)
+# S3 CONFIG
 # ─────────────────────────────────────────────
-try:
-    AWS_ACCESS_KEY = st.secrets["AWS_ACCESS_KEY_ID"]
-    AWS_SECRET_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
-    S3_BUCKET = st.secrets["S3_BUCKET"]
-    AWS_REGION = "eu-west-3"
-    BASE_PUBLIC_URL = "https://static.ora.ma/streamlit/"
-except Exception:
-    st.error("❌ Missing AWS secrets")
-    st.stop()
+AWS_ACCESS_KEY = st.secrets["AWS_ACCESS_KEY_ID"]
+AWS_SECRET_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
+S3_BUCKET = st.secrets["S3_BUCKET"]
+AWS_REGION = "eu-west-3"
+PUBLIC_BASE_URL = "https://static.ora.ma/streamlit/"
 
 s3 = boto3.client(
     "s3",
@@ -95,7 +101,7 @@ s3 = boto3.client(
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
-def sanitize_filename(name: str) -> str:
+def sanitize_filename(name):
     return re.sub(r"[^A-Za-z0-9_-]", "_", name).strip() or "image"
 
 HEADERS = {
@@ -109,9 +115,9 @@ HEADERS = {
 uploaded = st.file_uploader("Upload CSV or XLSX", type=["csv", "xlsx"])
 
 if uploaded:
-    admin_log("CSV uploaded", uploaded.name)
-
     df = pd.read_csv(uploaded) if uploaded.name.endswith(".csv") else pd.read_excel(uploaded)
+
+    add_admin_log("CSV uploaded", uploaded.name)
 
     st.subheader("📌 Columns detected")
     st.json(list(df.columns))
@@ -120,33 +126,30 @@ if uploaded:
     url_col = st.selectbox("Image URL column", df.columns)
 
     if st.button("🚀 Process Images"):
-        admin_log("Processing started", f"Rows: {len(df)}")
-
+        session_folder = f"streamlit/{SESSION_ID}/"
         zip_buffer = BytesIO()
         server_urls = [None] * len(df)
 
         uploaded_count = 0
         skipped_count = 0
 
-        session_folder = f"streamlit/{SESSION_ID}/"
         progress = st.progress(0.0)
-        status = st.empty()
+        status_box = st.empty()
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
             for idx, row in df.iterrows():
                 progress.progress((idx + 1) / len(df))
+
                 product = str(row[product_col])
                 url = str(row[url_col])
 
-                status.info(f"Processing: {product}")
+                status_box.info(f"Processing: {product}")
 
                 if not url.startswith("http"):
                     skipped_count += 1
-                    admin_log("Skipped row", product)
                     continue
 
                 try:
-                    # Download
                     r = requests.get(url, headers=HEADERS, timeout=20)
                     r.raise_for_status()
 
@@ -159,7 +162,6 @@ if uploaded:
                     filename = sanitize_filename(product) + ".jpg"
                     s3_key = session_folder + filename
 
-                    # Upload to S3 (NO ACL)
                     s3.upload_fileobj(
                         img_buffer,
                         S3_BUCKET,
@@ -167,22 +169,21 @@ if uploaded:
                         ExtraArgs={"ContentType": "image/jpeg"},
                     )
 
-                    public_url = BASE_PUBLIC_URL + SESSION_ID + "/" + filename
+                    public_url = PUBLIC_BASE_URL + SESSION_ID + "/" + filename
                     server_urls[idx] = public_url
 
-                    # ZIP COPY (NEW BUFFER – FIXED)
                     zipf.writestr(filename, img_buffer.getvalue())
-
                     uploaded_count += 1
-                    admin_log("Image uploaded", public_url)
 
-                except Exception as e:
+                except Exception:
                     skipped_count += 1
-                    admin_log("Error", str(e), level="ERROR")
 
         df["Server Image URL"] = server_urls
 
-        admin_log("Processing finished", f"Uploaded: {uploaded_count}, Skipped: {skipped_count}")
+        add_admin_log(
+            "Processing completed",
+            f"Uploaded: {uploaded_count}, Skipped: {skipped_count}, Output: updated_with_links.csv",
+        )
 
         st.success(f"🎉 Uploaded: {uploaded_count} | Skipped: {skipped_count}")
 
