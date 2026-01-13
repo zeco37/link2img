@@ -143,8 +143,13 @@ if uploaded_file:
                     log_user("✅ HTTP 200")
 
                     img = Image.open(BytesIO(r.content))
-                    if img.mode == "RGBA":
+                    original_mode = img.mode
+                    if img.mode != "RGB":
                         img = img.convert("RGB")
+                        log_user(f"ℹ️ Image mode converted {original_mode} → RGB")
+                        log_admin(
+                            f"CONVERT user={user} row={i+1} product='{product}' mode={original_mode} → RGB"
+                        )
 
                     raw_img = BytesIO()
                     img.save(raw_img, format="JPEG", quality=90)
